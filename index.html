@@ -119,6 +119,126 @@ const db = {
   bienvenidas: () => q(supabase.from("ftr_bienvenidas").select("fecha,cantidad")),
 };
 
+
+// ---------- CRM (otro proyecto de Supabase, SOLO LECTURA) ----------
+// La app de finanzas nunca escribe en el CRM: solo lee su documento.
+const CRM_URL = "https://duwcvzlcxdcbyvlxibrv.supabase.co";
+const CRM_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR1d2N2emxjeGRjYnl2bHhpYnJ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ2MzUzNTUsImV4cCI6MjEwMDIxMTM1NX0.F_gLyBH7oL5T8KOg3N1GUndBoPhS4k17AYLrZWlDCDc";
+const CRM_SESION = "ftr_fin_crm_sesion";
+const crmAuth = {
+  leer() { try { return JSON.parse(localStorage.getItem(CRM_SESION)); } catch (e) { return null; } },
+  guardar(x) { try { localStorage.setItem(CRM_SESION, JSON.stringify(x)); } catch (e) {} },
+  borrar() { try { localStorage.removeItem(CRM_SESION); } catch (e) {} },
+  async pedir(grant, cuerpo) {
+    const res = await fetch(`${CRM_URL}/auth/v1/token?grant_type=${grant}`, {
+      method: "POST", headers: { apikey: CRM_KEY, "Content-Type": "application/json" }, body: JSON.stringify(cuerpo),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = d.error_description || d.msg || d.error || "";
+      throw new Error(/invalid login credentials/i.test(msg) ? "Email o contraseña del CRM incorrectos" : (msg || "No se ha podido conectar con el CRM"));
+    }
+    this.guardar({ access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 45 });
+    return d.access_token;
+  },
+  login(email, password) { return this.pedir("password", { email, password }); },
+  async token() {
+    const x = this.leer();
+    if (!x || !x.refresh_token) return null;
+    if (x.access_token && x.expires_at > Math.floor(Date.now() / 1000)) return x.access_token;
+    try { return await this.pedir("refresh_token", { refresh_token: x.refresh_token }); }
+    catch (e) { this.borrar(); return null; }
+  },
+};
+async function cargarCRM() {
+  const t = await crmAuth.token();
+  if (!t) return null; // sin sesión del CRM
+  const res = await fetch(`${CRM_URL}/rest/v1/ftr_crm?id=eq.1&select=data`, { headers: { apikey: CRM_KEY, Authorization: `Bearer ${t}` } });
+  if (!res.ok) throw new Error(`el CRM ha respondido ${res.status}`);
+  const filas = await res.json();
+  const d = (filas[0] && filas[0].data) || {};
+  return { clientes: Array.isArray(d.clientes) ? d.clientes : [], cobros: Array.isArray(d.cobros) ? d.cobros : [] };
+}
+
+// Mismas reglas que el propio CRM (src/lib/consultas.js), para que las cifras coincidan.
+const isoADias = (iso) => { const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000) : null; };
+const diasAIso = (n) => new Date(n * 86400000).toISOString().slice(0, 10);
+const esCuotaDeContinuacion = (concepto) => { const m = /^Cuota\s*(\d+)/i.exec(String(concepto || "").trim()); return m ? Number(m[1]) > 1 : false; };
+
+function crmVentas(doc) {
+  const out = [];
+  for (const c of doc.clientes) {
+    const ciclos = (Array.isArray(c.historialCiclos) && c.historialCiclos.length > 0 ? c.historialCiclos
+      : c.importe ? [{ fecha: c.fechaInicio, modalidad: c.modalidad, importe: c.importe, semanasTotal: c.semanasTotal, motivo: "alta" }] : [])
+      .slice().sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+    const disparadores = doc.cobros.filter(co => co.clienteId === c.id && !esCuotaDeContinuacion(co.concepto))
+      .sort((a, b) => String(a.fechaPago).localeCompare(String(b.fechaPago)));
+    let j = 0;
+    ciclos.forEach((h, i) => {
+      const limite = ciclos[i + 1] && ciclos[i + 1].fecha;
+      let fecha = h.fecha;
+      if (j < disparadores.length && (!limite || String(disparadores[j].fechaPago) < String(limite))) { fecha = disparadores[j].fechaPago; j++; }
+      out.push({ clienteId: c.id, fecha, importe: Number(h.importe) || 0, motivo: h.motivo === "renovacion" ? "renovacion" : "alta" });
+    });
+  }
+  return out;
+}
+
+function crmEventosRenovacion(doc, hoy) {
+  const ev = [];
+  for (const c of doc.clientes) {
+    const ciclos = Array.isArray(c.historialCiclos) ? c.historialCiclos : [];
+    ciclos.forEach((h, i) => {
+      if (i < ciclos.length - 1) { ev.push({ fecha: ciclos[i + 1].fecha, renovo: true, estado: c.estado }); return; }
+      const ini = isoADias(h.fecha); const sem = Number(h.semanasTotal) || 0;
+      const fin = ini != null && sem > 0 ? diasAIso(ini + sem * 7) : h.fecha;
+      if (c.estado === "Finalizado" || c.estado === "Baja") { ev.push({ fecha: fin, renovo: false, estado: c.estado }); return; }
+      if (ini == null || sem <= 0) return;
+      if (ini + sem * 7 <= hoy) ev.push({ fecha: fin, renovo: true, estado: c.estado });
+    });
+  }
+  return ev;
+}
+
+// Resumen del CRM mes a mes: { "2026-10": { cobrado, facturacion, altas, ... } }
+function crmPorMes(doc) {
+  const hoy = isoADias(new Date().toISOString().slice(0, 10));
+  const M = {};
+  const m = (k) => M[k] || (M[k] = { cobrado: 0, nCobros: 0, facturacion: 0, nVentas: 0, altas: 0, renovVentas: 0, contratadoR: 0, recaudadoR: 0, aRenovar: 0, renovaron: 0, bajas: 0 });
+  const ventas = crmVentas(doc);
+  const ventasCli = {};
+  ventas.forEach(v => { (ventasCli[v.clienteId] = ventasCli[v.clienteId] || []).push(v); const x = m(String(v.fecha).slice(0, 7)); x.facturacion += v.importe; x.nVentas++; if (v.motivo === "alta") x.altas++; else { x.renovVentas++; x.contratadoR += v.importe; } });
+  Object.values(ventasCli).forEach(l => l.sort((a, b) => String(a.fecha).localeCompare(String(b.fecha))));
+  doc.cobros.forEach(co => {
+    if (co.estado !== "Cobrado" || !co.fechaPago) return;
+    const x = m(String(co.fechaPago).slice(0, 7)); const imp = Number(co.importe) || 0;
+    x.cobrado += imp; x.nCobros++;
+    // ¿a qué ciclo pertenece el cobro? al último que se vendió antes o ese mismo día
+    const l = ventasCli[co.clienteId] || []; let ciclo = null;
+    l.forEach(v => { if (String(v.fecha) <= String(co.fechaPago)) ciclo = v; });
+    if (ciclo && ciclo.motivo === "renovacion") x.recaudadoR += imp;
+  });
+  crmEventosRenovacion(doc, hoy).forEach(e => { const x = m(String(e.fecha).slice(0, 7)); x.aRenovar++; if (e.renovo) x.renovaron++; else if (e.estado === "Baja") x.bajas++; });
+  return M;
+}
+
+// Clientes en programa en una fecha (desde su primer ciclo hasta el fin del último; si siguen activos, hasta hoy o más)
+function crmActivosEn(doc, iso) {
+  const d = isoADias(iso); const hoy = isoADias(new Date().toISOString().slice(0, 10));
+  if (d == null || d > hoy) return null;
+  let n = 0;
+  for (const c of doc.clientes) {
+    const ciclos = (Array.isArray(c.historialCiclos) && c.historialCiclos.length ? c.historialCiclos : [{ fecha: c.fechaInicio, semanasTotal: c.semanasTotal }])
+      .filter(h => isoADias(h.fecha) != null).sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+    if (!ciclos.length) continue;
+    const ini = isoADias(ciclos[0].fecha); const ult = ciclos[ciclos.length - 1];
+    let fin = isoADias(ult.fecha) + (Number(ult.semanasTotal) || 0) * 7;
+    if (c.estado === "Activo" || c.estado === "Renovado") fin = Math.max(fin, hoy);
+    if (ini <= d && d < fin) n++;
+  }
+  return n;
+}
+
 // ---------- Cálculos ----------
 const BUCKET = { "Inbound DM": "inbound", "Inbound Comentario": "inbound", "Bienvenida": "outbound", "Otro": "outbound", "Lead Magnet": "lm" };
 
@@ -181,7 +301,6 @@ function finMetrics(keys, gastos, mesesData, categorias) {
   const totVals = rows.map(r => r.seguidores_totales).filter(v => v !== null && v !== undefined);
   const segTotales = totVals.length ? Number(totVals[totVals.length - 1]) : null;
   const ads = sumGastos(gastos, keys, pubCat);
-  const beneficio = facturacion !== null ? facturacion - gastosTot : null;
   // Cash collected: lo que entra de verdad en el mes
   const cobVals = rows.map(r => r.cobrado).filter(v => v !== null && v !== undefined);
   const cobrado = cobVals.length ? cobVals.reduce((s, v) => s + Number(v), 0) : null;
@@ -189,10 +308,13 @@ function finMetrics(keys, gastos, mesesData, categorias) {
   const impuestos = gastos.filter(g => keys.includes(g.mes) && impNombres.includes(g.categoria)).reduce((s, g) => s + (Number(g.importe) || 0), 0);
   const benDespues = cobrado !== null ? cobrado - gastosTot : null;
   const benAntes = cobrado !== null ? cobrado - (gastosTot - impuestos) : null;
+  // Cuadro de la academia: beneficio bruto = facturación − gastos sin impuestos
+  const beneficio = facturacion !== null ? facturacion - (gastosTot - impuestos) : null;
   return {
     facturacion, gastos: tieneGastos ? gastosTot : null, beneficio,
     margen: facturacion ? beneficio / facturacion : null,
     cobrado, impuestos: tieneGastos ? impuestos : null,
+    devoluciones: tieneGastos ? gastos.filter(g => keys.includes(g.mes) && g.categoria === "Devoluciones" && Number(g.importe) > 0).length : null,
     gastosSinImp: tieneGastos ? gastosTot - impuestos : null,
     benAntes, benDespues,
     margenAntes: cobrado ? benAntes / cobrado : null,
@@ -271,7 +393,7 @@ function YearNav({ year, setYear }) {
 }
 
 // ---------- Cierre de mes ----------
-function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, actions }) {
+function CierreView({ mes, setMes, gastos, mesesData, mesesEff, crmMes, categorias, objetivos, actions }) {
   const delMes = gastosMes(gastos, mes);
   const md = mesesData[mes] || {};
   const [addOpen, setAddOpen] = useState(false);
@@ -280,7 +402,16 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
 
   const confirmadas = categorias.filter(c => delMes.some(g => g.categoria === c.nombre)).length;
   const pendientes = categorias.filter(c => !delMes.some(g => g.categoria === c.nombre));
-  const fm = finMetrics([mes], gastos, mesesData, categorias);
+  const fm = finMetrics([mes], gastos, mesesEff || mesesData, categorias);
+  const cm = crmMes ? crmMes[mes] : null;
+  const crmHint = (campo, n) => {
+    if (!crmMes) return "Se rellenará solo al conectar el CRM";
+    if (!cm || !n) return "El CRM no tiene datos este mes";
+    const v = fmtMoney(cm[campo]);
+    return md[campo === "cobrado" ? "cobrado" : "facturacion"] !== null && md[campo === "cobrado" ? "cobrado" : "facturacion"] !== undefined
+      ? `Manda lo que has escrito. El CRM dice ${v}; borra el campo para usarlo.`
+      : `Del CRM: ${v}. Escribe solo si quieres corregirlo.`;
+  };
 
   const confirmarPendientes = () => {
     const rows = pendientes.map(c => ({ id: uid(), mes, categoria: c.nombre, importe: sugerencia(c, mes, gastos), nota: null }));
@@ -368,10 +499,12 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
       <div style={card}>
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Datos del mes</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-          <div><div style={label}>Cash collected (cobrado este mes, €)</div>
-            <NumInput width="100%" align="left" value={md.cobrado ?? null} placeholder="4509" onSave={(n) => actions.updateMes(mes, { cobrado: n })} /></div>
           <div><div style={label}>Facturación (vendido este mes, €)</div>
-            <NumInput width="100%" align="left" value={md.facturacion ?? null} placeholder="4973" onSave={(n) => actions.updateMes(mes, { facturacion: n })} /></div>
+            <NumInput width="100%" align="left" value={md.facturacion ?? null} placeholder={cm && cm.nVentas ? fmtInput(cm.facturacion) : "4973"} onSave={(n) => actions.updateMes(mes, { facturacion: n })} />
+            <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 4 }}>{crmHint("facturacion", cm && cm.nVentas)}</div></div>
+          <div><div style={label}>Cash collected (cobrado este mes, €)</div>
+            <NumInput width="100%" align="left" value={md.cobrado ?? null} placeholder={cm && cm.nCobros ? fmtInput(cm.cobrado) : "4509"} onSave={(n) => actions.updateMes(mes, { cobrado: n })} />
+            <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 4 }}>{crmHint("cobrado", cm && cm.nCobros)}</div></div>
           <div><div style={label}>Seguidores nuevos del mes</div>
             <NumInput integer width="100%" align="left" value={md.seguidores_nuevos ?? null} placeholder="5200" onSave={(n) => actions.updateMes(mes, { seguidores_nuevos: n })} /></div>
           <div><div style={label}>Seguidores totales a fin de mes</div>
@@ -382,7 +515,8 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
       <div style={card}>
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Resultado de {mesLabel(mes)}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-          <Stat title="Cash collected" value={fmtMoney(fm.cobrado)} hint={fm.cobrado === null ? "Apúntalo en Datos del mes" : null} />
+          <Stat title="Facturación" value={fmtMoney(fm.facturacion)} hint={fm.facturacion === null ? "Sin datos todavía" : null} />
+          <Stat title="Cash collected" value={fmtMoney(fm.cobrado)} hint={fm.cobrado === null ? "Sin datos todavía" : null} />
           <Stat title="Gastos confirmados" value={fmtMoney(fm.gastos ?? 0)} hint={`Impuestos: ${fmtMoney(fm.impuestos ?? 0)}`} />
           <Stat title="Beneficio real" value={fmtMoney(fm.benDespues)} hint="Cash collected menos gastos" />
           <Stat title={`% antes de impuestos (objetivo ${objetivos.margen}%)`} value={fmtPct(fm.margenAntes)} color={mColor(fm.margenAntes, objetivos)} />
@@ -431,7 +565,8 @@ function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos
 
       <div style={card}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-          <Stat title={`Cash collected ${year}`} value={fmtMoney(anual.cobrado, 0)} hint={`Facturación: ${fmtMoney(anual.facturacion, 0)}`} />
+          <Stat title={`Facturación ${year}`} value={fmtMoney(anual.facturacion, 0)} />
+          <Stat title={`Cash collected ${year}`} value={fmtMoney(anual.cobrado, 0)} />
           <Stat title="Gastos" value={fmtMoney(anual.gastos, 0)} hint={`Impuestos: ${fmtMoney(anual.impuestos, 0)}`} />
           <Stat title="Beneficio real" value={fmtMoney(anual.benDespues, 0)} />
           <Stat title={`% antes de impuestos (objetivo ${objetivos.margen}%)`} value={fmtPct(anual.margenAntes)} color={color(anual.margenAntes)} />
@@ -508,7 +643,7 @@ function avg(arr) { const v = arr.filter(x => x !== null && x !== undefined); re
 // ---------- Cuadro de mandos ----------
 // Cada fila: etiqueta, cómo calcularla para un conjunto de meses, formato y objetivo
 function buildSecciones(objetivos) {
-  const crm = (labelTxt) => ({ label: labelTxt, crm: true });
+  const crm = (labelTxt, get, fmt = "int", extra = {}) => ({ label: labelTxt, crm: true, get: (f, l, c) => c ? get(c, f, l) : null, fmt, ...extra });
   return [
     { hoja: "Métricas clave", nombre: "Publicidad (atraer)", filas: [
       { label: "Nuevos seguidores", get: (f) => f.segNuevos, fmt: "int" },
@@ -516,16 +651,17 @@ function buildSecciones(objetivos) {
       { label: "Coste por seguidor", get: (f) => f.cps, fmt: "eur3", goal: `<${String(objetivos.cps).replace(".", ",")} €`, ok: (v) => v <= objetivos.cps },
       { label: "Seguidores totales", get: (f) => f.segTotales, fmt: "int" },
     ]},
-    { hoja: "Métricas clave", nombre: "Ventas (convertir)", filas: [crm("Nº altas programa")] },
+    { hoja: "Métricas clave", nombre: "Ventas (convertir)", filas: [crm("Nº altas programa", c => c.altas)] },
     { hoja: "Métricas clave", nombre: "Finanzas (recoger)", filas: [
       { label: "Facturación total", get: (f) => f.facturacion, fmt: "eur" },
-      { label: "Gastos totales", get: (f) => f.gastos, fmt: "eur" },
+      { label: "Gastos totales (sin impuestos)", get: (f) => f.gastosSinImp, fmt: "eur" },
       { label: "Beneficio bruto", get: (f) => f.beneficio, fmt: "eur", goal: `>${objetivos.margen}%`, ok: (v, f) => f.margen !== null && f.margen * 100 >= objetivos.margen },
     ]},
     { hoja: "Métricas clave", nombre: "Servicio (entregar)", filas: [
-      crm("Nº clientes activos"), crm("Nº clientes a renovar"), crm("Renovaciones"),
-      { label: "% renovación", crm: true, goal: `>${objetivos.renovacion}%` },
-      crm("Bajas"), crm("Devoluciones"),
+      crm("Nº clientes activos", c => c.activos), crm("Nº clientes a renovar", c => c.aRenovar), crm("Renovaciones", c => c.renovaron),
+      crm("% renovación", c => c.aRenovar ? c.renovaron / c.aRenovar : null, "pct", { goal: `>${objetivos.renovacion}%`, ok: (v) => v * 100 >= objetivos.renovacion }),
+      crm("Bajas", c => c.bajas),
+      { label: "Devoluciones", get: (f) => f.devoluciones, fmt: "int" },
     ]},
     { hoja: "Conversaciones", nombre: "Conversaciones", filas: [
       { label: "Outbound", get: (f, l) => l.outbound, fmt: "int" },
@@ -550,9 +686,27 @@ function buildSecciones(objetivos) {
     { hoja: "Conversaciones", nombre: "Recaudación", filas: [
       { label: "Recaudado", get: (f, l) => l.recaudado, fmt: "eur" },
       { label: "Contratado", get: (f, l) => l.contratado, fmt: "eur" },
-      crm("Recaudado R"), crm("Contratado R"),
+      crm("Recaudado R", c => c.recaudadoR, "eur"), crm("Contratado R", c => c.contratadoR, "eur"),
+      crm("Total recaudado", (c, f, l) => (l.recaudado || 0) + c.recaudadoR, "eur"),
+      crm("Total contratado", (c, f, l) => (l.contratado || 0) + c.contratadoR, "eur"),
     ]},
   ];
+}
+
+// Suma del CRM para un grupo de meses (null si el CRM no está conectado)
+function crmAgg(keys, doc, porMes) {
+  if (!doc) return null;
+  const sum = (k) => keys.reduce((s, m) => s + ((porMes[m] || {})[k] || 0), 0);
+  return {
+    altas: sum("altas"), aRenovar: sum("aRenovar"), renovaron: sum("renovaron"), bajas: sum("bajas"),
+    recaudadoR: sum("recaudadoR"), contratadoR: sum("contratadoR"),
+    activos: (() => {
+      const hoyIso = new Date().toISOString().slice(0, 10);
+      const fin = lastDay(keys[keys.length - 1]);
+      if (fin <= hoyIso) return crmActivosEn(doc, fin);
+      return `${keys[keys.length - 1]}-01` <= hoyIso ? crmActivosEn(doc, hoyIso) : null; // mes en curso: a día de hoy
+    })(),
+  };
 }
 
 const fmtBy = (v, f) => {
@@ -570,7 +724,7 @@ const tsvBy = (v, f) => {
   return tsvNum(v, 2);
 };
 
-function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, leads, bienvenidas, leadsError }) {
+function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, leads, bienvenidas, leadsError, crmDoc, crmMes }) {
   const [copiado, setCopiado] = useState("");
   const [trim, setTrim] = useState(Math.floor(new Date().getMonth() / 3));
   const keys = MESES.map((_, i) => mesKey(year, i + 1));
@@ -587,11 +741,12 @@ function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, l
   const data = useMemo(() => cols.map(c => ({
     f: finMetrics(c.keys, gastos, mesesData, categorias),
     l: leadMetrics(leads, bienvenidas, `${c.keys[0]}-01`, lastDay(c.keys[c.keys.length - 1])),
-  })), [year, gastos, mesesData, categorias, leads, bienvenidas]);
+    c: crmAgg(c.keys, crmDoc, crmMes),
+  })), [year, gastos, mesesData, categorias, leads, bienvenidas, crmDoc, crmMes]);
 
   const copiar = (sec) => {
     const colIdx = [trim * 4, trim * 4 + 1, trim * 4 + 2, trim * 4 + 3];
-    const lines = sec.filas.map(fila => colIdx.map(i => fila.crm ? "" : tsvBy(fila.get(data[i].f, data[i].l), fila.fmt)).join("\t"));
+    const lines = sec.filas.map(fila => colIdx.map(i => tsvBy(fila.get(data[i].f, data[i].l, data[i].c), fila.fmt)).join("\t"));
     const text = lines.join("\n");
     const done = () => { setCopiado(sec.nombre); setTimeout(() => setCopiado(""), 2500); };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
@@ -611,7 +766,7 @@ function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, l
       </div>
       {leadsError && <div style={{ ...card, borderColor: COLORS.amber, color: COLORS.amber, fontSize: 13 }}>No he podido leer la app de leads: {leadsError}. Las filas de conversaciones y ventas salen vacías.</div>}
       <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>
-        "Copiar" copia los 3 meses y el REAL del trimestre elegido. En el Excel de la academia, haz clic en la celda de la primera fila de la sección, en el primer mes del trimestre, y pega. Las filas marcadas "CRM" se rellenarán cuando lo conectemos.
+        "Copiar" copia los 3 meses y el REAL del trimestre elegido. En el Excel de la academia, haz clic en la celda de la primera fila de la sección, en el primer mes del trimestre, y pega. {crmDoc ? "Las filas de clientes, renovaciones y bajas salen de tu CRM." : "Las filas marcadas \"CRM\" se rellenarán al conectar el CRM (arriba)."}
       </div>
       {secciones.map(sec => (
         <div key={sec.nombre} style={card}>
@@ -625,10 +780,9 @@ function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, l
               <tbody>
                 {sec.filas.map(fila => (
                   <tr key={fila.label}>
-                    <td style={{ fontWeight: 600 }}>{fila.label} {fila.crm && <Badge color={COLORS.primary}>CRM</Badge>}</td>
+                    <td style={{ fontWeight: 600 }}>{fila.label} {fila.crm && !crmDoc && <Badge color={COLORS.primary}>CRM</Badge>}</td>
                     {cols.map((c, i) => {
-                      if (fila.crm) return <td key={c.label} style={{ color: COLORS.muted, background: c.real ? "#f5f9fb" : null }}>—</td>;
-                      const v = fila.get(data[i].f, data[i].l);
+                      const v = fila.get(data[i].f, data[i].l, data[i].c);
                       const ok = fila.ok && v !== null && v !== undefined ? fila.ok(v, data[i].f) : null;
                       return <td key={c.label} style={{ background: c.real ? "#f5f9fb" : null, fontWeight: c.real ? 700 : 400, color: ok === null ? COLORS.ink : (ok ? COLORS.green : COLORS.red) }}>{fmtBy(v, fila.fmt)}</td>;
                     })}
@@ -724,7 +878,7 @@ function App() {
   }, []);
   if (session === undefined) return <div style={{ fontFamily: "Montserrat, system-ui, sans-serif", padding: 40, color: COLORS.muted, textAlign: "center" }}>Cargando…</div>;
   if (!session) return <LoginScreen />;
-  return <Panel email={session.user && session.user.email} onLogout={() => supabase.auth.signOut()} />;
+  return <Panel email={session.user && session.user.email} onLogout={() => { crmAuth.borrar(); supabase.auth.signOut(); }} />;
 }
 
 function LoginScreen() {
@@ -737,6 +891,7 @@ function LoginScreen() {
     if (!email.trim() || !pass) { setErr("Escribe tu email y tu contraseña"); return; }
     setBusy(true); setErr("");
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass });
+    if (!error) { try { await crmAuth.login(email.trim(), pass); } catch (e) { /* si el CRM usa otra contraseña, se conecta luego desde la app */ } }
     setBusy(false);
     if (error) setErr(error.message === "Invalid login credentials" ? "Email o contraseña incorrectos" : error.message);
   };
@@ -757,6 +912,40 @@ function LoginScreen() {
   );
 }
 
+// Conectar el CRM (si usa otra contraseña o la sesión ha caducado)
+function CrmConnect({ estado, error, onConectado }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const go = async (e) => {
+    e.preventDefault();
+    if (!email.trim() || !pass) { setErr("Escribe el email y la contraseña de tu CRM"); return; }
+    setBusy(true); setErr("");
+    try { await crmAuth.login(email.trim(), pass); setBusy(false); onConectado(); }
+    catch (e2) { setBusy(false); setErr(e2.message); }
+  };
+  return (
+    <div style={{ ...card, borderColor: `${COLORS.primary}88`, background: "#f3f9fb" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13.5 }}>
+          <b>CRM sin conectar.</b> {estado === "error" ? `No he podido leerlo (${error}).` : "Entra con el usuario de tu CRM para traer cobros, facturación y clientes."} La app solo lo lee, nunca lo modifica.
+        </div>
+        {!open && <button style={btnPrimary} onClick={() => setOpen(true)}>Conectar CRM</button>}
+      </div>
+      {open && (
+        <form onSubmit={go} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, marginTop: 10, alignItems: "end" }}>
+          <div><div style={label}>Email del CRM</div><input id="crm-email" type="email" autoComplete="username" style={inputStyle} value={email} onChange={e => { setEmail(e.target.value); setErr(""); }} /></div>
+          <div><div style={label}>Contraseña del CRM</div><input id="crm-pass" type="password" autoComplete="current-password" style={inputStyle} value={pass} onChange={e => { setPass(e.target.value); setErr(""); }} /></div>
+          <button type="submit" style={btnPrimary}>{busy ? "Conectando…" : "Conectar"}</button>
+          {err && <div style={{ gridColumn: "1 / -1", fontSize: 13, color: COLORS.red }}>{err}</div>}
+        </form>
+      )}
+    </div>
+  );
+}
+
 // ---------- Panel ----------
 function Panel({ email, onLogout }) {
   const [tab, setTab] = useState("cierre");
@@ -772,6 +961,9 @@ function Panel({ email, onLogout }) {
   const [error, setError] = useState("");
   const [leadsError, setLeadsError] = useState("");
   const [saveError, setSaveError] = useState("");
+  const [crmDoc, setCrmDoc] = useState(null);
+  const [crmEstado, setCrmEstado] = useState("cargando"); // conectado | sin-sesion | error
+  const [crmError, setCrmError] = useState("");
 
   const load = async () => {
     setLoading(true); setError("");
@@ -787,6 +979,10 @@ function Panel({ email, onLogout }) {
       const [l, b] = await Promise.all([db.leads(), db.bienvenidas()]);
       setLeads(l || []); setBienvenidas(b || []); setLeadsError("");
     } catch (e) { setLeadsError(e.message || String(e)); }
+    try {
+      const d = await cargarCRM();
+      setCrmDoc(d); setCrmEstado(d ? "conectado" : "sin-sesion"); setCrmError("");
+    } catch (e) { setCrmDoc(null); setCrmEstado("error"); setCrmError(e.message || String(e)); }
     setLoading(false);
   };
   useEffect(() => { load(); }, []);
@@ -807,6 +1003,21 @@ function Panel({ email, onLogout }) {
     saveCategorias: (cats) => { setCategorias(cats); guard(() => db.upsertConfig("categorias", cats)); },
     saveObjetivos: (o) => { setObjetivos(o); guard(() => db.upsertConfig("objetivos", o)); },
   };
+
+  // Datos de cada mes: lo que escribes a mano manda; si está vacío, se usa el CRM
+  const crmMes = useMemo(() => crmDoc ? crmPorMes(crmDoc) : {}, [crmDoc]);
+  const mesesEff = useMemo(() => {
+    const out = { ...mesesData };
+    Object.entries(crmMes).forEach(([k, c]) => {
+      const md = out[k] || { mes: k };
+      out[k] = {
+        ...md,
+        cobrado: md.cobrado !== null && md.cobrado !== undefined ? md.cobrado : (c.nCobros ? round2(c.cobrado) : null),
+        facturacion: md.facturacion !== null && md.facturacion !== undefined ? md.facturacion : (c.nVentas ? round2(c.facturacion) : null),
+      };
+    });
+    return out;
+  }, [mesesData, crmMes]);
 
   const tabs = [["cierre", "Cierre de mes"], ["resultado", "Resultado"], ["cuadro", "Cuadro de mandos"], ["ajustes", "Ajustes"]];
 
@@ -829,11 +1040,12 @@ function Panel({ email, onLogout }) {
       </div>
       {error && <div style={{ ...card, borderColor: COLORS.red, color: COLORS.red }}>No he podido cargar tus datos de finanzas: {error}. No toques nada hasta que vuelva a cargar (pulsa Actualizar).</div>}
       {saveError && <div style={{ ...card, borderColor: COLORS.red, color: COLORS.red, fontSize: 13 }}>{saveError}</div>}
+      {!loading && crmEstado !== "conectado" && <CrmConnect estado={crmEstado} error={crmError} onConectado={load} />}
       {!error && !loading && (
         <ErrorBoundary key={tab}>
-          {tab === "cierre" && <CierreView mes={mes} setMes={setMes} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} actions={actions} />}
-          {tab === "resultado" && <ResultadoView year={year} setYear={setYear} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} />}
-          {tab === "cuadro" && <CuadroView year={year} setYear={setYear} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} leads={leads} bienvenidas={bienvenidas} leadsError={leadsError} />}
+          {tab === "cierre" && <CierreView mes={mes} setMes={setMes} gastos={gastos} mesesData={mesesData} mesesEff={mesesEff} crmMes={crmDoc ? crmMes : null} categorias={categorias} objetivos={objetivos} actions={actions} />}
+          {tab === "resultado" && <ResultadoView year={year} setYear={setYear} gastos={gastos} mesesData={mesesEff} categorias={categorias} objetivos={objetivos} />}
+          {tab === "cuadro" && <CuadroView crmDoc={crmDoc} crmMes={crmMes} year={year} setYear={setYear} gastos={gastos} mesesData={mesesEff} categorias={categorias} objetivos={objetivos} leads={leads} bienvenidas={bienvenidas} leadsError={leadsError} />}
           {tab === "ajustes" && <AjustesView categorias={categorias} objetivos={objetivos} gastos={gastos} actions={actions} />}
         </ErrorBoundary>
       )}
