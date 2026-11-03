@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fuel to Run — Finanzas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #f7f9fa; }
+  #root { max-width: 1100px; margin: 0 auto; }
+  * { box-sizing: border-box; }
+  input, select, button { font-family: inherit; }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.grid { border-collapse: collapse; font-size: 12.5px; min-width: 100%; }
+  table.grid th, table.grid td { padding: 6px 8px; border-bottom: 1px solid #e2e9ec; white-space: nowrap; text-align: right; }
+  table.grid th:first-child, table.grid td:first-child { text-align: left; position: sticky; left: 0; background: #fff; z-index: 1; }
+  table.grid thead th { font-size: 11px; color: #6b7f8c; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo } = React;
+
+// ---------- Config ----------
+const SUPABASE_URL = "https://fjtvgwxebyaanbbxbnmy.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZqdHZnd3hlYnlhYW5iYnhibm15Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYxMTE2NTQsImV4cCI6MjEwMTY4NzY1NH0.OkNHGLHLp-PhAL0cj77H23NR-ZBdjIEQTqed07Vp5qU";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const COLORS = {
+  primary: "#5ba5c0", primaryDark: "#3d7f97", navy: "#1f3a4d",
+  coral: "#e8734a", coralDark: "#c85a34", cream: "#f7f9fa", paper: "#ffffff",
+  ink: "#233240", muted: "#6b7f8c", line: "#e2e9ec",
+  green: "#4a9d6f", amber: "#d1962f", red: "#c0392b",
+};
+
+// frecuencia: "mensual" = sugiere el importe del mes anterior
+//             "trimestral" = sugiere el de hace 3 meses en ene/abr/jul/oct, 0 el resto
+//             "puntual" = sugiere 0
+const DEFAULT_CATEGORIAS = [
+  { nombre: "Autónomo", frecuencia: "mensual" },
+  { nombre: "Colegio", frecuencia: "puntual" },
+  { nombre: "SRC", frecuencia: "puntual" },
+  { nombre: "RGPD", frecuencia: "puntual" },
+  { nombre: "Luz + Agua", frecuencia: "puntual" },
+  { nombre: "Servicios", frecuencia: "mensual" },
+  { nombre: "Editor", frecuencia: "puntual" },
+  { nombre: "Alquiler", frecuencia: "mensual" },
+  { nombre: "Gestor", frecuencia: "mensual" },
+  { nombre: "IRPF", frecuencia: "trimestral" },
+  { nombre: "IVA", frecuencia: "trimestral" },
+  { nombre: "Publicidad", frecuencia: "mensual", esPublicidad: true },
+  { nombre: "Comisiones", frecuencia: "mensual" },
+  { nombre: "Otros", frecuencia: "puntual" },
+  { nombre: "Devoluciones", frecuencia: "puntual" },
+];
+const DEFAULT_OBJETIVOS = { cps: 0.25, margen: 60, renovacion: 50, indOut: 2, indIn: 30, showUp: 90, cierre: 50, irpfPct: 20 };
+
+const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+const MESES_LARGO = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+
+// ---------- Helpers ----------
+const pad = (n) => String(n).padStart(2, "0");
+const mesKey = (y, m) => `${y}-${pad(m)}`; // m = 1..12
+const shiftMes = (key, delta) => {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return mesKey(d.getFullYear(), d.getMonth() + 1);
+};
+const mesActual = () => { const d = new Date(); return mesKey(d.getFullYear(), d.getMonth() + 1); };
+const mesLabel = (key) => { const [y, m] = key.split("-").map(Number); return `${MESES_LARGO[m - 1]} ${y}`; };
+const lastDay = (key) => { const [y, m] = key.split("-").map(Number); return `${key}-${pad(new Date(y, m, 0).getDate())}`; };
+const inRange = (d, from, to) => !!d && d >= from && d <= to;
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+const fmtMoney = (n, dec = 2) => (n === null || n === undefined || isNaN(n)) ? "—" :
+  Number(n).toLocaleString("es-ES", { style: "currency", currency: "EUR", minimumFractionDigits: dec, maximumFractionDigits: dec });
+const fmtInt = (n) => (n === null || n === undefined || isNaN(n)) ? "—" : Math.round(n).toLocaleString("es-ES");
+const fmtPct = (x) => (x === null || x === undefined || isNaN(x) || !isFinite(x)) ? "—" : `${(x * 100).toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`;
+const fmtInput = (n) => (n === null || n === undefined || n === "") ? "" : String(round2(n)).replace(".", ",");
+
+function parseNum(s) {
+  if (s === null || s === undefined) return null;
+  let t = String(s).replace(/€/g, "").replace(/\s/g, "");
+  if (t === "") return null;
+  if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");
+  const n = Number(t);
+  return isNaN(n) ? NaN : n;
+}
+
+// Valor para pegar en el Excel de la academia (sin € ni separador de miles)
+const tsvNum = (n, dec = 2) => (n === null || n === undefined || isNaN(n) || !isFinite(n)) ? "" : Number(n).toFixed(dec).replace(".", ",");
+const tsvPct = (x) => (x === null || x === undefined || isNaN(x) || !isFinite(x)) ? "" : `${(x * 100).toFixed(2).replace(".", ",")}%`;
+
+// ---------- Supabase ----------
+async function q(promise) {
+  const { data, error } = await promise;
+  if (error) { console.error(error); throw error; }
+  return data;
+}
+const db = {
+  gastos: () => q(supabase.from("ftr_fin_gastos").select("*")),
+  upsertGasto: (g) => q(supabase.from("ftr_fin_gastos").upsert(g)),
+  upsertGastos: (gs) => q(supabase.from("ftr_fin_gastos").upsert(gs)),
+  deleteGasto: (id) => q(supabase.from("ftr_fin_gastos").delete().eq("id", id)),
+  meses: () => q(supabase.from("ftr_fin_mes").select("*")),
+  upsertMes: (m) => q(supabase.from("ftr_fin_mes").upsert(m)),
+  config: () => q(supabase.from("ftr_fin_config").select("*")),
+  upsertConfig: (clave, valor) => q(supabase.from("ftr_fin_config").upsert({ clave, valor })),
+  // Solo lectura: app de leads
+  leads: () => q(supabase.from("ftr_leads").select("fuente,etapa,fecha_creacion,fecha_agendada,fecha_realizada,fecha_cierre,valor_contratado,recaudado")),
+  bienvenidas: () => q(supabase.from("ftr_bienvenidas").select("fecha,cantidad")),
+};
+
+// ---------- Cálculos ----------
+const BUCKET = { "Inbound DM": "inbound", "Inbound Comentario": "inbound", "Bienvenida": "outbound", "Otro": "outbound", "Lead Magnet": "lm" };
+
+function leadMetrics(leads, bienvenidas, from, to) {
+  const outbound = bienvenidas.reduce((s, b) => inRange(b.fecha, from, to) ? s + (Number(b.cantidad) || 0) : s, 0);
+  const inbound = leads.filter(l => BUCKET[l.fuente] === "inbound" && inRange(l.fecha_creacion, from, to)).length;
+  const lm = leads.filter(l => BUCKET[l.fuente] === "lm" && inRange(l.fecha_creacion, from, to)).length;
+  const agOut = leads.filter(l => BUCKET[l.fuente] === "outbound" && inRange(l.fecha_agendada, from, to)).length;
+  const agIn = leads.filter(l => BUCKET[l.fuente] === "inbound" && inRange(l.fecha_agendada, from, to)).length;
+  const agLM = leads.filter(l => BUCKET[l.fuente] === "lm" && inRange(l.fecha_agendada, from, to)).length;
+  const agendadas = agOut + agIn + agLM;
+  const realizadas = leads.filter(l => inRange(l.fecha_realizada, from, to)).length;
+  const cerradosL = leads.filter(l => l.etapa === "Cerrada" && inRange(l.fecha_cierre, from, to));
+  return {
+    outbound, agOut, indOut: outbound ? agOut / outbound : null,
+    inbound, agIn, indIn: inbound ? agIn / inbound : null,
+    lm, agLM, indLM: lm ? agLM / lm : null,
+    agendadas, realizadas, showUp: agendadas ? realizadas / agendadas : null,
+    cerradas: cerradosL.length, cierre: realizadas ? cerradosL.length / realizadas : null,
+    recaudado: cerradosL.reduce((s, l) => s + (Number(l.recaudado) || 0), 0),
+    contratado: cerradosL.reduce((s, l) => s + (Number(l.valor_contratado) || 0), 0),
+  };
+}
+
+function gastosMes(gastos, key) { return gastos.filter(g => g.mes === key); }
+function sumGastos(gastos, keys, categoria) {
+  return gastos.filter(g => keys.includes(g.mes) && (!categoria || g.categoria === categoria))
+    .reduce((s, g) => s + (Number(g.importe) || 0), 0);
+}
+
+function sugerencia(cat, key, gastos) {
+  const tot = (k) => gastos.filter(g => g.mes === k && g.categoria === cat.nombre);
+  if (cat.frecuencia === "mensual") {
+    const prev = tot(shiftMes(key, -1));
+    return prev.length ? round2(prev.reduce((s, g) => s + Number(g.importe || 0), 0)) : 0;
+  }
+  if (cat.frecuencia === "trimestral") {
+    const m = Number(key.split("-")[1]);
+    if (![1, 4, 7, 10].includes(m)) return 0;
+    const prev = tot(shiftMes(key, -3));
+    return prev.length ? round2(prev.reduce((s, g) => s + Number(g.importe || 0), 0)) : 0;
+  }
+  return 0;
+}
+
+// Métricas financieras de un conjunto de meses
+function finMetrics(keys, gastos, mesesData, categorias) {
+  const pubCat = (categorias.find(c => c.esPublicidad) || {}).nombre || "Publicidad";
+  const rows = keys.map(k => mesesData[k] || {});
+  const factVals = rows.map(r => r.facturacion).filter(v => v !== null && v !== undefined);
+  const facturacion = factVals.length ? factVals.reduce((s, v) => s + Number(v), 0) : null;
+  const gastosTot = sumGastos(gastos, keys);
+  const tieneGastos = gastos.some(g => keys.includes(g.mes));
+  const segVals = rows.map(r => r.seguidores_nuevos).filter(v => v !== null && v !== undefined);
+  const segNuevos = segVals.length ? segVals.reduce((s, v) => s + Number(v), 0) : null;
+  const totVals = rows.map(r => r.seguidores_totales).filter(v => v !== null && v !== undefined);
+  const segTotales = totVals.length ? Number(totVals[totVals.length - 1]) : null;
+  const ads = sumGastos(gastos, keys, pubCat);
+  const beneficio = facturacion !== null ? facturacion - gastosTot : null;
+  return {
+    facturacion, gastos: tieneGastos ? gastosTot : null, beneficio,
+    margen: facturacion ? beneficio / facturacion : null,
+    segNuevos, segTotales, ads: tieneGastos ? ads : null,
+    cps: segNuevos ? ads / segNuevos : null,
+  };
+}
+
+// ---------- UI atoms ----------
+const card = { background: COLORS.paper, border: `1px solid ${COLORS.line}`, borderRadius: 14, padding: "16px 18px", marginBottom: 14 };
+const btn = { border: `1px solid ${COLORS.line}`, background: COLORS.paper, color: COLORS.ink, borderRadius: 10, padding: "8px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" };
+const btnPrimary = { ...btn, background: COLORS.primaryDark, borderColor: COLORS.primaryDark, color: "#fff" };
+const inputStyle = { border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: "7px 9px", fontSize: 14, width: "100%", color: COLORS.ink, background: "#fff" };
+const label = { fontSize: 12, color: COLORS.muted, fontWeight: 600 };
+
+function Badge({ children, color = COLORS.muted, onClick }) {
+  return <span onClick={onClick} style={{ display: "inline-block", fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 999, color, background: `${color}1c`, cursor: onClick ? "pointer" : "default", whiteSpace: "nowrap" }}>{children}</span>;
+}
+
+function Stat({ title, value, color, hint }) {
+  return (
+    <div style={{ background: COLORS.cream, borderRadius: 12, padding: "12px 14px", minWidth: 0 }}>
+      <div style={label}>{title}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: color || COLORS.ink, marginTop: 2 }}>{value}</div>
+      {hint && <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 2 }}>{hint}</div>}
+    </div>
+  );
+}
+
+// Input numérico que guarda al salir del campo o pulsar Enter
+function NumInput({ value, placeholder, onSave, width = 110, align = "right", integer }) {
+  const [v, setV] = useState(fmtInput(value));
+  const [err, setErr] = useState(false);
+  useEffect(() => { setV(fmtInput(value)); }, [value]);
+  const commit = () => {
+    const n = parseNum(v);
+    if (Number.isNaN(n)) { setErr(true); return; }
+    setErr(false);
+    const out = n === null ? null : (integer ? Math.round(n) : round2(n));
+    if (out !== (value === undefined ? null : value)) onSave(out);
+  };
+  return <input inputMode="decimal" value={v} placeholder={placeholder}
+    onChange={e => { setV(e.target.value); setErr(false); }}
+    onBlur={commit} onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
+    style={{ ...inputStyle, width, textAlign: align, borderColor: err ? COLORS.red : COLORS.line }} />;
+}
+
+class ErrorBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) return <div style={{ ...card, color: COLORS.red }}>Esta pestaña ha fallado: {String(this.state.error.message || this.state.error)}. El resto de la app sigue funcionando.</div>;
+    return this.props.children;
+  }
+}
+
+function MesNav({ mes, setMes }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button style={btn} onClick={() => setMes(shiftMes(mes, -1))} aria-label="Mes anterior">‹</button>
+      <div style={{ fontWeight: 800, fontSize: 18, color: COLORS.navy, minWidth: 170, textAlign: "center", textTransform: "capitalize" }}>{mesLabel(mes)}</div>
+      <button style={btn} onClick={() => setMes(shiftMes(mes, 1))} aria-label="Mes siguiente">›</button>
+    </div>
+  );
+}
+
+function YearNav({ year, setYear }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button style={btn} onClick={() => setYear(year - 1)} aria-label="Año anterior">‹</button>
+      <div style={{ fontWeight: 800, fontSize: 18, color: COLORS.navy, minWidth: 60, textAlign: "center" }}>{year}</div>
+      <button style={btn} onClick={() => setYear(year + 1)} aria-label="Año siguiente">›</button>
+    </div>
+  );
+}
+
+// ---------- Cierre de mes ----------
+function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, actions }) {
+  const delMes = gastosMes(gastos, mes);
+  const md = mesesData[mes] || {};
+  const [addOpen, setAddOpen] = useState(false);
+  const [nuevo, setNuevo] = useState({ categoria: "Otros", importe: "", nota: "" });
+  const [addErr, setAddErr] = useState("");
+
+  const confirmadas = categorias.filter(c => delMes.some(g => g.categoria === c.nombre)).length;
+  const pendientes = categorias.filter(c => !delMes.some(g => g.categoria === c.nombre));
+  const fm = finMetrics([mes], gastos, mesesData, categorias);
+
+  const confirmarPendientes = () => {
+    const rows = pendientes.map(c => ({ id: uid(), mes, categoria: c.nombre, importe: sugerencia(c, mes, gastos), nota: null }));
+    if (rows.length) actions.addGastos(rows);
+  };
+
+  const addGasto = () => {
+    const n = parseNum(nuevo.importe);
+    if (n === null || Number.isNaN(n)) { setAddErr("Escribe un importe válido"); return; }
+    if (nuevo.categoria === "Otros" && !nuevo.nota.trim()) { setAddErr("En Otros, apunta el motivo (por ejemplo, Fontanero)"); return; }
+    actions.addGastos([{ id: uid(), mes, categoria: nuevo.categoria, importe: round2(n), nota: nuevo.nota.trim() || null }]);
+    setNuevo({ categoria: nuevo.categoria, importe: "", nota: "" }); setAddErr(""); setAddOpen(false);
+  };
+
+  const margenOk = fm.margen !== null && fm.margen * 100 >= objetivos.margen;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <MesNav mes={mes} setMes={setMes} />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Badge color={pendientes.length ? COLORS.amber : COLORS.green}>{confirmadas} de {categorias.length} confirmados</Badge>
+          {pendientes.length > 0 && <button style={btnPrimary} onClick={confirmarPendientes}>Confirmar pendientes</button>}
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+          <div style={{ fontWeight: 800, color: COLORS.navy }}>Gastos</div>
+          <div style={{ fontSize: 12, color: COLORS.muted }}>En gris, lo que se confirmará si pulsas "Confirmar"</div>
+        </div>
+        {categorias.map(c => {
+          const rows = delMes.filter(g => g.categoria === c.nombre);
+          const sug = sugerencia(c, mes, gastos);
+          return (
+            <div key={c.nombre} style={{ padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto auto", gap: 10, alignItems: "center" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.ink }}>
+                  {c.nombre} <span style={{ fontSize: 11, color: COLORS.muted, fontWeight: 500 }}>{c.frecuencia}</span>
+                </div>
+                {rows.length === 0 && <PendingRow sug={sug} onConfirm={(n) => actions.addGastos([{ id: uid(), mes, categoria: c.nombre, importe: n === null ? sug : n, nota: null }])} />}
+                {rows.length === 1 && <>
+                  <NumInput value={Number(rows[0].importe)} onSave={(n) => n === null ? actions.deleteGasto(rows[0].id) : actions.updateGasto({ ...rows[0], importe: n })} />
+                  <button style={{ ...btn, padding: "6px 9px" }} title="Quitar (vuelve a pendiente)" onClick={() => actions.deleteGasto(rows[0].id)}>✕</button>
+                </>}
+                {rows.length > 1 && <>
+                  <div style={{ fontWeight: 700, fontSize: 14, width: 110, textAlign: "right" }}>{fmtMoney(rows.reduce((s, g) => s + Number(g.importe || 0), 0))}</div>
+                  <span style={{ width: 34 }} />
+                </>}
+              </div>
+              {rows.length === 1 && rows[0].nota && <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 2 }}>{rows[0].nota}</div>}
+              {rows.length > 1 && rows.map(g => (
+                <div key={g.id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto auto", gap: 10, alignItems: "center", marginTop: 6, paddingLeft: 12 }}>
+                  <div style={{ fontSize: 12.5, color: COLORS.muted }}>{g.nota || "Sin nota"}</div>
+                  <NumInput value={Number(g.importe)} width={100} onSave={(n) => n === null ? actions.deleteGasto(g.id) : actions.updateGasto({ ...g, importe: n })} />
+                  <button style={{ ...btn, padding: "6px 9px" }} onClick={() => actions.deleteGasto(g.id)}>✕</button>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+
+        <div style={{ marginTop: 12 }}>
+          {!addOpen && <button style={btn} onClick={() => setAddOpen(true)}>+ Añadir gasto con nota</button>}
+          {addOpen && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, alignItems: "end" }}>
+              <div><div style={label}>Categoría</div>
+                <select style={inputStyle} value={nuevo.categoria} onChange={e => setNuevo({ ...nuevo, categoria: e.target.value })}>
+                  {categorias.map(c => <option key={c.nombre}>{c.nombre}</option>)}
+                </select></div>
+              <div><div style={label}>Importe (€)</div>
+                <input style={inputStyle} inputMode="decimal" value={nuevo.importe} placeholder="85,50" onChange={e => { setNuevo({ ...nuevo, importe: e.target.value }); setAddErr(""); }} /></div>
+              <div><div style={label}>Motivo</div>
+                <input style={inputStyle} value={nuevo.nota} placeholder="Fontanero" onChange={e => { setNuevo({ ...nuevo, nota: e.target.value }); setAddErr(""); }} /></div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button style={btnPrimary} onClick={addGasto}>Añadir</button>
+                <button style={btn} onClick={() => { setAddOpen(false); setAddErr(""); }}>Cancelar</button>
+              </div>
+              {addErr && <div style={{ gridColumn: "1 / -1", fontSize: 13, color: COLORS.red }}>{addErr}</div>}
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 8 }}>Si en una categoría hay más de un gasto, se suman y se ven por separado.</div>
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Datos de Instagram</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+          <div><div style={label}>Seguidores nuevos del mes</div>
+            <NumInput integer width="100%" align="left" value={md.seguidores_nuevos ?? null} placeholder="5200" onSave={(n) => actions.updateMes(mes, { seguidores_nuevos: n })} /></div>
+          <div><div style={label}>Seguidores totales a fin de mes</div>
+            <NumInput integer width="100%" align="left" value={md.seguidores_totales ?? null} placeholder="40349" onSave={(n) => actions.updateMes(mes, { seguidores_totales: n })} /></div>
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Resultado de {mesLabel(mes)}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          <Stat title="Facturación" value={fmtMoney(fm.facturacion)} hint={fm.facturacion === null ? "Llegará del CRM" : null} />
+          <Stat title="Gastos confirmados" value={fmtMoney(fm.gastos ?? 0)} />
+          <Stat title="Beneficio" value={fmtMoney(fm.beneficio)} />
+          <Stat title={`Margen (objetivo ${objetivos.margen}%)`} value={fmtPct(fm.margen)} color={fm.margen === null ? null : (margenOk ? COLORS.green : COLORS.red)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PendingRow({ sug, onConfirm }) {
+  const [v, setV] = useState("");
+  const [err, setErr] = useState(false);
+  const go = () => {
+    const n = parseNum(v);
+    if (Number.isNaN(n)) { setErr(true); return; }
+    onConfirm(n === null ? null : round2(n));
+  };
+  return <>
+    <input inputMode="decimal" value={v} placeholder={fmtInput(sug)} onChange={e => { setV(e.target.value); setErr(false); }}
+      onKeyDown={e => { if (e.key === "Enter") go(); }}
+      style={{ ...inputStyle, width: 110, textAlign: "right", borderColor: err ? COLORS.red : COLORS.line, background: "#fffaf2" }} />
+    <button style={{ ...btn, padding: "6px 9px", color: COLORS.amber, borderColor: `${COLORS.amber}66` }} onClick={go}>Confirmar</button>
+  </>;
+}
+
+// ---------- Resultado anual ----------
+function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos }) {
+  const keys = MESES.map((_, i) => mesKey(year, i + 1));
+  const porMes = keys.map(k => finMetrics([k], gastos, mesesData, categorias));
+  const anual = finMetrics(keys, gastos, mesesData, categorias);
+  const trimestres = [0, 1, 2, 3].map(t => {
+    const ks = keys.slice(t * 3, t * 3 + 3);
+    const f = finMetrics(ks, gastos, mesesData, categorias);
+    return { t: t + 1, ...f, irpf: f.beneficio !== null ? Math.max(f.beneficio, 0) * objetivos.irpfPct / 100 : null };
+  });
+  const color = (m) => m === null ? COLORS.muted : (m * 100 >= objetivos.margen ? COLORS.green : COLORS.red);
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <YearNav year={year} setYear={setYear} />
+      </div>
+
+      <div style={card}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          <Stat title={`Facturación ${year}`} value={fmtMoney(anual.facturacion, 0)} />
+          <Stat title="Gastos" value={fmtMoney(anual.gastos, 0)} />
+          <Stat title="Beneficio" value={fmtMoney(anual.beneficio, 0)} />
+          <Stat title={`Margen (objetivo ${objetivos.margen}%)`} value={fmtPct(anual.margen)} color={color(anual.margen)} />
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 8 }}>Mes a mes</div>
+        <div className="scroll-x">
+          <table className="grid">
+            <thead><tr><th>Mes</th><th>Facturación</th><th>Gastos</th><th>Beneficio</th><th>Margen</th></tr></thead>
+            <tbody>
+              {porMes.map((m, i) => (
+                <tr key={i}>
+                  <td style={{ fontWeight: 700 }}>{MESES[i]}</td>
+                  <td>{fmtMoney(m.facturacion)}</td><td>{fmtMoney(m.gastos)}</td>
+                  <td>{fmtMoney(m.beneficio)}</td>
+                  <td style={{ color: color(m.margen), fontWeight: 700 }}>{fmtPct(m.margen)}</td>
+                </tr>
+              ))}
+              <tr style={{ fontWeight: 800 }}>
+                <td>Media</td>
+                <td>{fmtMoney(avg(porMes.map(m => m.facturacion)))}</td>
+                <td>{fmtMoney(avg(porMes.map(m => m.gastos)))}</td>
+                <td>{fmtMoney(avg(porMes.map(m => m.beneficio)))}</td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 4 }}>Hucha de impuestos por trimestre</div>
+        <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>
+          Estimación de IRPF: {objetivos.irpfPct}% del beneficio del trimestre (cámbialo en Ajustes con lo que te diga tu gestor). El IVA se calculará cuando conectemos el CRM, porque depende de qué cobros llevan IVA y cuáles están exentos.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+          {trimestres.map(t => <Stat key={t.t} title={`${t.t}º trimestre`} value={fmtMoney(t.irpf, 0)} hint={t.beneficio === null ? "Sin facturación" : `Beneficio ${fmtMoney(t.beneficio, 0)}`} />)}
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 8 }}>Gastos por categoría</div>
+        <div className="scroll-x">
+          <table className="grid">
+            <thead><tr><th>Categoría</th>{MESES.map(m => <th key={m}>{m}</th>)}<th>Total</th></tr></thead>
+            <tbody>
+              {categorias.map(c => {
+                const vals = keys.map(k => { const r = gastos.filter(g => g.mes === k && g.categoria === c.nombre); return r.length ? r.reduce((s, g) => s + Number(g.importe || 0), 0) : null; });
+                return (
+                  <tr key={c.nombre}>
+                    <td style={{ fontWeight: 600 }}>{c.nombre}</td>
+                    {vals.map((v, i) => <td key={i} style={{ color: v ? COLORS.ink : COLORS.muted }}>{v === null ? "" : fmtMoney(v)}</td>)}
+                    <td style={{ fontWeight: 700 }}>{fmtMoney(vals.reduce((s, v) => s + (v || 0), 0))}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+function avg(arr) { const v = arr.filter(x => x !== null && x !== undefined); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; }
+
+// ---------- Cuadro de mandos ----------
+// Cada fila: etiqueta, cómo calcularla para un conjunto de meses, formato y objetivo
+function buildSecciones(objetivos) {
+  const crm = (labelTxt) => ({ label: labelTxt, crm: true });
+  return [
+    { hoja: "Métricas clave", nombre: "Publicidad (atraer)", filas: [
+      { label: "Nuevos seguidores", get: (f) => f.segNuevos, fmt: "int" },
+      { label: "Inversión ads", get: (f) => f.ads, fmt: "eur" },
+      { label: "Coste por seguidor", get: (f) => f.cps, fmt: "eur3", goal: `<${String(objetivos.cps).replace(".", ",")} €`, ok: (v) => v <= objetivos.cps },
+      { label: "Seguidores totales", get: (f) => f.segTotales, fmt: "int" },
+    ]},
+    { hoja: "Métricas clave", nombre: "Ventas (convertir)", filas: [crm("Nº altas programa")] },
+    { hoja: "Métricas clave", nombre: "Finanzas (recoger)", filas: [
+      { label: "Facturación total", get: (f) => f.facturacion, fmt: "eur" },
+      { label: "Gastos totales", get: (f) => f.gastos, fmt: "eur" },
+      { label: "Beneficio bruto", get: (f) => f.beneficio, fmt: "eur", goal: `>${objetivos.margen}%`, ok: (v, f) => f.margen !== null && f.margen * 100 >= objetivos.margen },
+    ]},
+    { hoja: "Métricas clave", nombre: "Servicio (entregar)", filas: [
+      crm("Nº clientes activos"), crm("Nº clientes a renovar"), crm("Renovaciones"),
+      { label: "% renovación", crm: true, goal: `>${objetivos.renovacion}%` },
+      crm("Bajas"), crm("Devoluciones"),
+    ]},
+    { hoja: "Conversaciones", nombre: "Conversaciones", filas: [
+      { label: "Outbound", get: (f, l) => l.outbound, fmt: "int" },
+      { label: "Agendadas outbound", get: (f, l) => l.agOut, fmt: "int" },
+      { label: "% inducción outbound", get: (f, l) => l.indOut, fmt: "pct", goal: `${objetivos.indOut}-4%`, ok: (v) => v * 100 >= objetivos.indOut },
+      { label: "Inbound", get: (f, l) => l.inbound, fmt: "int" },
+      { label: "Agendadas inbound", get: (f, l) => l.agIn, fmt: "int" },
+      { label: "% inducción inbound", get: (f, l) => l.indIn, fmt: "pct", goal: `${objetivos.indIn}-50%`, ok: (v) => v * 100 >= objetivos.indIn },
+    ]},
+    { hoja: "Conversaciones", nombre: "Lead magnet (solo tuyo, no está en la academia)", extra: true, filas: [
+      { label: "Lead magnet totales", get: (f, l) => l.lm, fmt: "int" },
+      { label: "Agendadas LM", get: (f, l) => l.agLM, fmt: "int" },
+      { label: "% inducción LM", get: (f, l) => l.indLM, fmt: "pct" },
+    ]},
+    { hoja: "Conversaciones", nombre: "Ventas", filas: [
+      { label: "Agendadas", get: (f, l) => l.agendadas, fmt: "int" },
+      { label: "Realizadas", get: (f, l) => l.realizadas, fmt: "int" },
+      { label: "% show up", get: (f, l) => l.showUp, fmt: "pct", goal: `${objetivos.showUp}%`, ok: (v) => v * 100 >= objetivos.showUp },
+      { label: "Cerradas", get: (f, l) => l.cerradas, fmt: "int" },
+      { label: "% cierre", get: (f, l) => l.cierre, fmt: "pct", goal: `>${objetivos.cierre}%`, ok: (v) => v * 100 >= objetivos.cierre },
+    ]},
+    { hoja: "Conversaciones", nombre: "Recaudación", filas: [
+      { label: "Recaudado", get: (f, l) => l.recaudado, fmt: "eur" },
+      { label: "Contratado", get: (f, l) => l.contratado, fmt: "eur" },
+      crm("Recaudado R"), crm("Contratado R"),
+    ]},
+  ];
+}
+
+const fmtBy = (v, f) => {
+  if (v === null || v === undefined) return "—";
+  if (f === "int") return fmtInt(v);
+  if (f === "pct") return fmtPct(v);
+  if (f === "eur3") return fmtMoney(v, 3);
+  return fmtMoney(v, 2);
+};
+const tsvBy = (v, f) => {
+  if (v === null || v === undefined) return "";
+  if (f === "int") return String(Math.round(v));
+  if (f === "pct") return tsvPct(v);
+  if (f === "eur3") return tsvNum(v, 3);
+  return tsvNum(v, 2);
+};
+
+function CuadroView({ year, setYear, gastos, mesesData, categorias, objetivos, leads, bienvenidas, leadsError }) {
+  const [copiado, setCopiado] = useState("");
+  const [trim, setTrim] = useState(Math.floor(new Date().getMonth() / 3));
+  const keys = MESES.map((_, i) => mesKey(year, i + 1));
+  const secciones = useMemo(() => buildSecciones(objetivos), [objetivos]);
+
+  // Columnas: Ene Feb Mar T1 | Abr May Jun T2 | ... | Anual
+  const cols = [];
+  [0, 1, 2, 3].forEach(t => {
+    keys.slice(t * 3, t * 3 + 3).forEach((k, i) => cols.push({ label: MESES[t * 3 + i], keys: [k] }));
+    cols.push({ label: `T${t + 1}`, keys: keys.slice(t * 3, t * 3 + 3), real: true });
+  });
+  cols.push({ label: "Anual", keys, real: true });
+
+  const data = useMemo(() => cols.map(c => ({
+    f: finMetrics(c.keys, gastos, mesesData, categorias),
+    l: leadMetrics(leads, bienvenidas, `${c.keys[0]}-01`, lastDay(c.keys[c.keys.length - 1])),
+  })), [year, gastos, mesesData, categorias, leads, bienvenidas]);
+
+  const copiar = (sec) => {
+    const colIdx = [trim * 4, trim * 4 + 1, trim * 4 + 2, trim * 4 + 3];
+    const lines = sec.filas.map(fila => colIdx.map(i => fila.crm ? "" : tsvBy(fila.get(data[i].f, data[i].l), fila.fmt)).join("\t"));
+    const text = lines.join("\n");
+    const done = () => { setCopiado(sec.nombre); setTimeout(() => setCopiado(""), 2500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+    else fallbackCopy(text, done);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <YearNav year={year} setYear={setYear} />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={label}>Trimestre para copiar</span>
+          <select style={{ ...inputStyle, width: 90 }} value={trim} onChange={e => setTrim(Number(e.target.value))}>
+            {[0, 1, 2, 3].map(t => <option key={t} value={t}>{t + 1}º</option>)}
+          </select>
+        </div>
+      </div>
+      {leadsError && <div style={{ ...card, borderColor: COLORS.amber, color: COLORS.amber, fontSize: 13 }}>No he podido leer la app de leads: {leadsError}. Las filas de conversaciones y ventas salen vacías.</div>}
+      <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>
+        "Copiar" copia los 3 meses y el REAL del trimestre elegido. En el Excel de la academia, haz clic en la celda de la primera fila de la sección, en el primer mes del trimestre, y pega. Las filas marcadas "CRM" se rellenarán cuando lo conectemos.
+      </div>
+      {secciones.map(sec => (
+        <div key={sec.nombre} style={card}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
+            <div><div style={{ fontWeight: 800, color: COLORS.navy }}>{sec.nombre}</div><div style={{ fontSize: 11.5, color: COLORS.muted }}>Hoja "{sec.hoja}"</div></div>
+            {!sec.extra && <button style={btn} onClick={() => copiar(sec)}>{copiado === sec.nombre ? "Copiado ✓" : `Copiar T${trim + 1}`}</button>}
+          </div>
+          <div className="scroll-x">
+            <table className="grid">
+              <thead><tr><th style={{ minWidth: 150 }}>Métrica</th>{cols.map(c => <th key={c.label} style={c.real ? { background: "#eef5f8" } : null}>{c.label}</th>)}<th>Objetivo</th></tr></thead>
+              <tbody>
+                {sec.filas.map(fila => (
+                  <tr key={fila.label}>
+                    <td style={{ fontWeight: 600 }}>{fila.label} {fila.crm && <Badge color={COLORS.primary}>CRM</Badge>}</td>
+                    {cols.map((c, i) => {
+                      if (fila.crm) return <td key={c.label} style={{ color: COLORS.muted, background: c.real ? "#f5f9fb" : null }}>—</td>;
+                      const v = fila.get(data[i].f, data[i].l);
+                      const ok = fila.ok && v !== null && v !== undefined ? fila.ok(v, data[i].f) : null;
+                      return <td key={c.label} style={{ background: c.real ? "#f5f9fb" : null, fontWeight: c.real ? 700 : 400, color: ok === null ? COLORS.ink : (ok ? COLORS.green : COLORS.red) }}>{fmtBy(v, fila.fmt)}</td>;
+                    })}
+                    <td style={{ color: COLORS.muted }}>{fila.goal || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); done(); } catch (e) { alert("No he podido copiar. Selecciona la tabla a mano."); }
+  document.body.removeChild(ta);
+}
+
+// ---------- Ajustes ----------
+function AjustesView({ categorias, objetivos, gastos, actions }) {
+  const [nueva, setNueva] = useState({ nombre: "", frecuencia: "mensual" });
+  const [err, setErr] = useState("");
+  const setCat = (i, patch) => actions.saveCategorias(categorias.map((c, j) => j === i ? { ...c, ...patch } : c));
+  const move = (i, d) => { const a = [...categorias]; const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; actions.saveCategorias(a); };
+  const remove = (i) => {
+    const c = categorias[i];
+    if (gastos.some(g => g.categoria === c.nombre)) { alert(`"${c.nombre}" tiene gastos guardados. No la borro para no perder histórico.`); return; }
+    actions.saveCategorias(categorias.filter((_, j) => j !== i));
+  };
+  const add = () => {
+    const n = nueva.nombre.trim();
+    if (!n) { setErr("Escribe un nombre"); return; }
+    if (categorias.some(c => c.nombre.toLowerCase() === n.toLowerCase())) { setErr("Ya existe esa categoría"); return; }
+    actions.saveCategorias([...categorias, { nombre: n, frecuencia: nueva.frecuencia }]);
+    setNueva({ nombre: "", frecuencia: "mensual" }); setErr("");
+  };
+  const goalFields = [
+    ["margen", "Margen de beneficio mínimo (%)"], ["cps", "Coste por seguidor máximo (€)"],
+    ["renovacion", "% renovación mínimo"], ["indOut", "% inducción outbound mínimo"],
+    ["indIn", "% inducción inbound mínimo"], ["showUp", "% show up mínimo"],
+    ["cierre", "% cierre mínimo"], ["irpfPct", "IRPF a apartar (% del beneficio)"],
+  ];
+  return (
+    <div>
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 4 }}>Categorías de gasto</div>
+        <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>Mensual: te propone el importe del mes anterior. Trimestral: el de hace 3 meses en enero, abril, julio y octubre. Puntual: te propone 0.</div>
+        {categorias.map((c, i) => (
+          <div key={c.nombre} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 130px auto auto auto", gap: 6, alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{c.nombre} {c.esPublicidad && <Badge color={COLORS.coral}>inversión ads</Badge>}</div>
+            <select style={inputStyle} value={c.frecuencia} onChange={e => setCat(i, { frecuencia: e.target.value })}>
+              <option value="mensual">Mensual</option><option value="trimestral">Trimestral</option><option value="puntual">Puntual</option>
+            </select>
+            <button style={{ ...btn, padding: "6px 9px" }} onClick={() => move(i, -1)} aria-label="Subir">↑</button>
+            <button style={{ ...btn, padding: "6px 9px" }} onClick={() => move(i, 1)} aria-label="Bajar">↓</button>
+            <button style={{ ...btn, padding: "6px 9px" }} onClick={() => remove(i)} aria-label="Borrar">✕</button>
+          </div>
+        ))}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 130px auto", gap: 6, marginTop: 10 }}>
+          <input style={inputStyle} placeholder="Nueva categoría" value={nueva.nombre} onChange={e => { setNueva({ ...nueva, nombre: e.target.value }); setErr(""); }} />
+          <select style={inputStyle} value={nueva.frecuencia} onChange={e => setNueva({ ...nueva, frecuencia: e.target.value })}>
+            <option value="mensual">Mensual</option><option value="trimestral">Trimestral</option><option value="puntual">Puntual</option>
+          </select>
+          <button style={btnPrimary} onClick={add}>Añadir</button>
+        </div>
+        {err && <div style={{ fontSize: 13, color: COLORS.red, marginTop: 6 }}>{err}</div>}
+      </div>
+      <div style={card}>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Objetivos</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+          {goalFields.map(([k, t]) => (
+            <div key={k}><div style={label}>{t}</div>
+              <NumInput width="100%" align="left" value={objetivos[k]} onSave={(n) => n !== null && actions.saveObjetivos({ ...objetivos, [k]: n })} /></div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Acceso (login de Supabase) ----------
+function App() {
+  const [session, setSession] = useState(undefined); // undefined = comprobando
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session || null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s || null));
+    return () => sub && sub.subscription && sub.subscription.unsubscribe();
+  }, []);
+  if (session === undefined) return <div style={{ fontFamily: "Montserrat, system-ui, sans-serif", padding: 40, color: COLORS.muted, textAlign: "center" }}>Cargando…</div>;
+  if (!session) return <LoginScreen />;
+  return <Panel email={session.user && session.user.email} onLogout={() => supabase.auth.signOut()} />;
+}
+
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!email.trim() || !pass) { setErr("Escribe tu email y tu contraseña"); return; }
+    setBusy(true); setErr("");
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass });
+    setBusy(false);
+    if (error) setErr(error.message === "Invalid login credentials" ? "Email o contraseña incorrectos" : error.message);
+  };
+  return (
+    <div style={{ fontFamily: "Montserrat, system-ui, sans-serif", color: COLORS.ink, padding: "60px 16px", display: "flex", justifyContent: "center" }}>
+      <form onSubmit={submit} style={{ ...card, width: "100%", maxWidth: 360, padding: "24px 22px" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1, color: COLORS.coral }}>FUEL TO RUN</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: COLORS.navy, marginBottom: 16 }}>Finanzas</div>
+        <div style={label}>Email</div>
+        <input id="login-email" type="email" autoComplete="username" style={{ ...inputStyle, marginBottom: 10 }} value={email} onChange={e => { setEmail(e.target.value); setErr(""); }} />
+        <div style={label}>Contraseña</div>
+        <input id="login-pass" type="password" autoComplete="current-password" style={{ ...inputStyle, marginBottom: 14 }} value={pass} onChange={e => { setPass(e.target.value); setErr(""); }} />
+        {err && <div style={{ fontSize: 13, color: COLORS.red, marginBottom: 10 }}>{err}</div>}
+        <button type="submit" style={{ ...btnPrimary, width: "100%" }}>{busy ? "Entrando…" : "Entrar"}</button>
+        <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 10 }}>Este dispositivo recordará la sesión hasta que pulses "Salir".</div>
+      </form>
+    </div>
+  );
+}
+
+// ---------- Panel ----------
+function Panel({ email, onLogout }) {
+  const [tab, setTab] = useState("cierre");
+  const [mes, setMes] = useState(shiftMes(mesActual(), -1)); // por defecto, el mes que toca cerrar
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [gastos, setGastos] = useState([]);
+  const [mesesData, setMesesData] = useState({});
+  const [categorias, setCategorias] = useState(DEFAULT_CATEGORIAS);
+  const [objetivos, setObjetivos] = useState(DEFAULT_OBJETIVOS);
+  const [leads, setLeads] = useState([]);
+  const [bienvenidas, setBienvenidas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [leadsError, setLeadsError] = useState("");
+  const [saveError, setSaveError] = useState("");
+
+  const load = async () => {
+    setLoading(true); setError("");
+    try {
+      const [g, m, c] = await Promise.all([db.gastos(), db.meses(), db.config()]);
+      setGastos(g || []);
+      const mm = {}; (m || []).forEach(r => { mm[r.mes] = r; }); setMesesData(mm);
+      const cfg = {}; (c || []).forEach(r => { cfg[r.clave] = r.valor; });
+      if (Array.isArray(cfg.categorias) && cfg.categorias.length) setCategorias(cfg.categorias);
+      if (cfg.objetivos) setObjetivos({ ...DEFAULT_OBJETIVOS, ...cfg.objetivos });
+    } catch (e) { setError(e.message || String(e)); }
+    try {
+      const [l, b] = await Promise.all([db.leads(), db.bienvenidas()]);
+      setLeads(l || []); setBienvenidas(b || []); setLeadsError("");
+    } catch (e) { setLeadsError(e.message || String(e)); }
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
+
+  // Cada cambio se aplica en pantalla y se guarda; si falla el guardado, se avisa y se recarga lo que hay en Supabase
+  const guard = async (fn) => {
+    try { await fn(); setSaveError(""); }
+    catch (e) { setSaveError("No se ha guardado el último cambio: " + (e.message || e) + ". He recargado los datos."); load(); }
+  };
+  const actions = {
+    addGastos: (rows) => { setGastos(prev => [...prev, ...rows]); guard(() => db.upsertGastos(rows)); },
+    updateGasto: (row) => { setGastos(prev => prev.map(g => g.id === row.id ? row : g)); guard(() => db.upsertGasto(row)); },
+    deleteGasto: (id) => { setGastos(prev => prev.filter(g => g.id !== id)); guard(() => db.deleteGasto(id)); },
+    updateMes: (key, patch) => {
+      const row = { ...(mesesData[key] || { mes: key }), ...patch, mes: key };
+      setMesesData(prev => ({ ...prev, [key]: row })); guard(() => db.upsertMes(row));
+    },
+    saveCategorias: (cats) => { setCategorias(cats); guard(() => db.upsertConfig("categorias", cats)); },
+    saveObjetivos: (o) => { setObjetivos(o); guard(() => db.upsertConfig("objetivos", o)); },
+  };
+
+  const tabs = [["cierre", "Cierre de mes"], ["resultado", "Resultado"], ["cuadro", "Cuadro de mandos"], ["ajustes", "Ajustes"]];
+
+  return (
+    <div style={{ fontFamily: "Montserrat, system-ui, sans-serif", color: COLORS.ink, padding: "18px 16px 40px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1, color: COLORS.coral }}>FUEL TO RUN</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: COLORS.navy }}>Finanzas</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button style={btn} onClick={load}>{loading ? "Cargando…" : "Actualizar"}</button>
+          <button style={btn} onClick={onLogout} title={email || ""}>Salir</button>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, overflowX: "auto" }}>
+        {tabs.map(([k, t]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ ...btn, whiteSpace: "nowrap", background: tab === k ? COLORS.navy : COLORS.paper, color: tab === k ? "#fff" : COLORS.ink, borderColor: tab === k ? COLORS.navy : COLORS.line }}>{t}</button>
+        ))}
+      </div>
+      {error && <div style={{ ...card, borderColor: COLORS.red, color: COLORS.red }}>No he podido cargar tus datos de finanzas: {error}. No toques nada hasta que vuelva a cargar (pulsa Actualizar).</div>}
+      {saveError && <div style={{ ...card, borderColor: COLORS.red, color: COLORS.red, fontSize: 13 }}>{saveError}</div>}
+      {!error && !loading && (
+        <ErrorBoundary key={tab}>
+          {tab === "cierre" && <CierreView mes={mes} setMes={setMes} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} actions={actions} />}
+          {tab === "resultado" && <ResultadoView year={year} setYear={setYear} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} />}
+          {tab === "cuadro" && <CuadroView year={year} setYear={setYear} gastos={gastos} mesesData={mesesData} categorias={categorias} objetivos={objetivos} leads={leads} bienvenidas={bienvenidas} leadsError={leadsError} />}
+          {tab === "ajustes" && <AjustesView categorias={categorias} objetivos={objetivos} gastos={gastos} actions={actions} />}
+        </ErrorBoundary>
+      )}
+    </div>
+  );
+}
+</script>
+
+<script>
+  try {
+    var source = document.getElementById("app-source").textContent;
+    var compiled = Babel.transform(source, { presets: [["react", { runtime: "classic" }]] }).code;
+    var runApp = new Function("React", "window", "document", compiled + "\n; ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));");
+    runApp(React, window, document);
+  } catch (err) {
+    document.getElementById("root").innerHTML =
+      '<div style="padding:24px;font-family:sans-serif;color:#c0392b;white-space:pre-wrap;">Error al cargar la app:\n' +
+      (err && err.message ? err.message : err) + '</div>';
+    console.error(err);
+  }
+</script>
+</body>
+</html>
