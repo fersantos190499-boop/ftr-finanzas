@@ -164,6 +164,10 @@ function sugerencia(cat, key, gastos) {
   return 0;
 }
 
+// Categorías que cuentan como impuestos (para el % antes/después de impuestos)
+const IMPUESTOS_POR_DEFECTO = ["IRPF", "IVA", "Autónomo"];
+const esImpuesto = (c) => c.esImpuesto !== undefined ? !!c.esImpuesto : IMPUESTOS_POR_DEFECTO.includes(c.nombre);
+
 // Métricas financieras de un conjunto de meses
 function finMetrics(keys, gastos, mesesData, categorias) {
   const pubCat = (categorias.find(c => c.esPublicidad) || {}).nombre || "Publicidad";
@@ -178,9 +182,21 @@ function finMetrics(keys, gastos, mesesData, categorias) {
   const segTotales = totVals.length ? Number(totVals[totVals.length - 1]) : null;
   const ads = sumGastos(gastos, keys, pubCat);
   const beneficio = facturacion !== null ? facturacion - gastosTot : null;
+  // Cash collected: lo que entra de verdad en el mes
+  const cobVals = rows.map(r => r.cobrado).filter(v => v !== null && v !== undefined);
+  const cobrado = cobVals.length ? cobVals.reduce((s, v) => s + Number(v), 0) : null;
+  const impNombres = categorias.filter(esImpuesto).map(c => c.nombre);
+  const impuestos = gastos.filter(g => keys.includes(g.mes) && impNombres.includes(g.categoria)).reduce((s, g) => s + (Number(g.importe) || 0), 0);
+  const benDespues = cobrado !== null ? cobrado - gastosTot : null;
+  const benAntes = cobrado !== null ? cobrado - (gastosTot - impuestos) : null;
   return {
     facturacion, gastos: tieneGastos ? gastosTot : null, beneficio,
     margen: facturacion ? beneficio / facturacion : null,
+    cobrado, impuestos: tieneGastos ? impuestos : null,
+    gastosSinImp: tieneGastos ? gastosTot - impuestos : null,
+    benAntes, benDespues,
+    margenAntes: cobrado ? benAntes / cobrado : null,
+    margenDespues: cobrado ? benDespues / cobrado : null,
     segNuevos, segTotales, ads: tieneGastos ? ads : null,
     cps: segNuevos ? ads / segNuevos : null,
   };
@@ -279,7 +295,6 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
     setNuevo({ categoria: nuevo.categoria, importe: "", nota: "" }); setAddErr(""); setAddOpen(false);
   };
 
-  const margenOk = fm.margen !== null && fm.margen * 100 >= objetivos.margen;
 
   return (
     <div>
@@ -351,8 +366,12 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
       </div>
 
       <div style={card}>
-        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Datos de Instagram</div>
+        <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Datos del mes</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+          <div><div style={label}>Cash collected (cobrado este mes, €)</div>
+            <NumInput width="100%" align="left" value={md.cobrado ?? null} placeholder="4509" onSave={(n) => actions.updateMes(mes, { cobrado: n })} /></div>
+          <div><div style={label}>Facturación (vendido este mes, €)</div>
+            <NumInput width="100%" align="left" value={md.facturacion ?? null} placeholder="4973" onSave={(n) => actions.updateMes(mes, { facturacion: n })} /></div>
           <div><div style={label}>Seguidores nuevos del mes</div>
             <NumInput integer width="100%" align="left" value={md.seguidores_nuevos ?? null} placeholder="5200" onSave={(n) => actions.updateMes(mes, { seguidores_nuevos: n })} /></div>
           <div><div style={label}>Seguidores totales a fin de mes</div>
@@ -363,10 +382,11 @@ function CierreView({ mes, setMes, gastos, mesesData, categorias, objetivos, act
       <div style={card}>
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 10 }}>Resultado de {mesLabel(mes)}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-          <Stat title="Facturación" value={fmtMoney(fm.facturacion)} hint={fm.facturacion === null ? "Llegará del CRM" : null} />
-          <Stat title="Gastos confirmados" value={fmtMoney(fm.gastos ?? 0)} />
-          <Stat title="Beneficio" value={fmtMoney(fm.beneficio)} />
-          <Stat title={`Margen (objetivo ${objetivos.margen}%)`} value={fmtPct(fm.margen)} color={fm.margen === null ? null : (margenOk ? COLORS.green : COLORS.red)} />
+          <Stat title="Cash collected" value={fmtMoney(fm.cobrado)} hint={fm.cobrado === null ? "Apúntalo en Datos del mes" : null} />
+          <Stat title="Gastos confirmados" value={fmtMoney(fm.gastos ?? 0)} hint={`Impuestos: ${fmtMoney(fm.impuestos ?? 0)}`} />
+          <Stat title="Beneficio real" value={fmtMoney(fm.benDespues)} hint="Cash collected menos gastos" />
+          <Stat title={`% antes de impuestos (objetivo ${objetivos.margen}%)`} value={fmtPct(fm.margenAntes)} color={mColor(fm.margenAntes, objetivos)} />
+          <Stat title="% después de impuestos" value={fmtPct(fm.margenDespues)} />
         </div>
       </div>
     </div>
@@ -389,6 +409,8 @@ function PendingRow({ sug, onConfirm }) {
   </>;
 }
 
+const mColor = (m, objetivos) => m === null || m === undefined ? null : (m * 100 >= objetivos.margen ? COLORS.green : COLORS.red);
+
 // ---------- Resultado anual ----------
 function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos }) {
   const keys = MESES.map((_, i) => mesKey(year, i + 1));
@@ -397,7 +419,7 @@ function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos
   const trimestres = [0, 1, 2, 3].map(t => {
     const ks = keys.slice(t * 3, t * 3 + 3);
     const f = finMetrics(ks, gastos, mesesData, categorias);
-    return { t: t + 1, ...f, irpf: f.beneficio !== null ? Math.max(f.beneficio, 0) * objetivos.irpfPct / 100 : null };
+    return { t: t + 1, ...f, irpf: f.benAntes !== null ? Math.max(f.benAntes, 0) * objetivos.irpfPct / 100 : null };
   });
   const color = (m) => m === null ? COLORS.muted : (m * 100 >= objetivos.margen ? COLORS.green : COLORS.red);
 
@@ -409,10 +431,11 @@ function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos
 
       <div style={card}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-          <Stat title={`Facturación ${year}`} value={fmtMoney(anual.facturacion, 0)} />
-          <Stat title="Gastos" value={fmtMoney(anual.gastos, 0)} />
-          <Stat title="Beneficio" value={fmtMoney(anual.beneficio, 0)} />
-          <Stat title={`Margen (objetivo ${objetivos.margen}%)`} value={fmtPct(anual.margen)} color={color(anual.margen)} />
+          <Stat title={`Cash collected ${year}`} value={fmtMoney(anual.cobrado, 0)} hint={`Facturación: ${fmtMoney(anual.facturacion, 0)}`} />
+          <Stat title="Gastos" value={fmtMoney(anual.gastos, 0)} hint={`Impuestos: ${fmtMoney(anual.impuestos, 0)}`} />
+          <Stat title="Beneficio real" value={fmtMoney(anual.benDespues, 0)} />
+          <Stat title={`% antes de impuestos (objetivo ${objetivos.margen}%)`} value={fmtPct(anual.margenAntes)} color={color(anual.margenAntes)} />
+          <Stat title="% después de impuestos" value={fmtPct(anual.margenDespues)} />
         </div>
       </div>
 
@@ -420,22 +443,27 @@ function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 8 }}>Mes a mes</div>
         <div className="scroll-x">
           <table className="grid">
-            <thead><tr><th>Mes</th><th>Facturación</th><th>Gastos</th><th>Beneficio</th><th>Margen</th></tr></thead>
+            <thead><tr><th>Mes</th><th>Facturación</th><th>Cash collected</th><th>Gastos</th><th>Impuestos</th><th>Beneficio real</th><th>% antes imp.</th><th>% después imp.</th></tr></thead>
             <tbody>
               {porMes.map((m, i) => (
                 <tr key={i}>
                   <td style={{ fontWeight: 700 }}>{MESES[i]}</td>
-                  <td>{fmtMoney(m.facturacion)}</td><td>{fmtMoney(m.gastos)}</td>
-                  <td>{fmtMoney(m.beneficio)}</td>
-                  <td style={{ color: color(m.margen), fontWeight: 700 }}>{fmtPct(m.margen)}</td>
+                  <td style={{ color: COLORS.muted }}>{fmtMoney(m.facturacion)}</td>
+                  <td>{fmtMoney(m.cobrado)}</td><td>{fmtMoney(m.gastos)}</td>
+                  <td style={{ color: COLORS.muted }}>{fmtMoney(m.impuestos)}</td>
+                  <td style={{ fontWeight: 700 }}>{fmtMoney(m.benDespues)}</td>
+                  <td style={{ color: color(m.margenAntes), fontWeight: 700 }}>{fmtPct(m.margenAntes)}</td>
+                  <td>{fmtPct(m.margenDespues)}</td>
                 </tr>
               ))}
               <tr style={{ fontWeight: 800 }}>
                 <td>Media</td>
                 <td>{fmtMoney(avg(porMes.map(m => m.facturacion)))}</td>
+                <td>{fmtMoney(avg(porMes.map(m => m.cobrado)))}</td>
                 <td>{fmtMoney(avg(porMes.map(m => m.gastos)))}</td>
-                <td>{fmtMoney(avg(porMes.map(m => m.beneficio)))}</td>
-                <td></td>
+                <td>{fmtMoney(avg(porMes.map(m => m.impuestos)))}</td>
+                <td>{fmtMoney(avg(porMes.map(m => m.benDespues)))}</td>
+                <td></td><td></td>
               </tr>
             </tbody>
           </table>
@@ -445,10 +473,10 @@ function ResultadoView({ year, setYear, gastos, mesesData, categorias, objetivos
       <div style={card}>
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 4 }}>Hucha de impuestos por trimestre</div>
         <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>
-          Estimación de IRPF: {objetivos.irpfPct}% del beneficio del trimestre (cámbialo en Ajustes con lo que te diga tu gestor). El IVA se calculará cuando conectemos el CRM, porque depende de qué cobros llevan IVA y cuáles están exentos.
+          Estimación de IRPF: {objetivos.irpfPct}% del beneficio antes de impuestos del trimestre (cámbialo en Ajustes con lo que te diga tu gestor). El IVA se calculará cuando conectemos el CRM, porque depende de qué cobros llevan IVA y cuáles están exentos.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
-          {trimestres.map(t => <Stat key={t.t} title={`${t.t}º trimestre`} value={fmtMoney(t.irpf, 0)} hint={t.beneficio === null ? "Sin facturación" : `Beneficio ${fmtMoney(t.beneficio, 0)}`} />)}
+          {trimestres.map(t => <Stat key={t.t} title={`${t.t}º trimestre`} value={fmtMoney(t.irpf, 0)} hint={t.benAntes === null ? "Sin cash collected" : `Beneficio antes de imp. ${fmtMoney(t.benAntes, 0)}`} />)}
         </div>
       </div>
 
@@ -649,10 +677,13 @@ function AjustesView({ categorias, objetivos, gastos, actions }) {
     <div>
       <div style={card}>
         <div style={{ fontWeight: 800, color: COLORS.navy, marginBottom: 4 }}>Categorías de gasto</div>
-        <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>Mensual: te propone el importe del mes anterior. Trimestral: el de hace 3 meses en enero, abril, julio y octubre. Puntual: te propone 0.</div>
+        <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 10 }}>Mensual: te propone el importe del mes anterior. Trimestral: el de hace 3 meses en enero, abril, julio y octubre. Puntual: te propone 0. Las marcadas como "Impuesto" no se restan en el % antes de impuestos.</div>
         {categorias.map((c, i) => (
-          <div key={c.nombre} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 130px auto auto auto", gap: 6, alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+          <div key={c.nombre} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto 130px auto auto auto", gap: 6, alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${COLORS.line}` }}>
             <div style={{ fontWeight: 600, fontSize: 14 }}>{c.nombre} {c.esPublicidad && <Badge color={COLORS.coral}>inversión ads</Badge>}</div>
+            <label style={{ fontSize: 12, color: COLORS.muted, display: "flex", gap: 4, alignItems: "center", whiteSpace: "nowrap" }}>
+              <input id={`imp-${i}`} type="checkbox" checked={esImpuesto(c)} onChange={e => setCat(i, { esImpuesto: e.target.checked })} /> Impuesto
+            </label>
             <select style={inputStyle} value={c.frecuencia} onChange={e => setCat(i, { frecuencia: e.target.value })}>
               <option value="mensual">Mensual</option><option value="trimestral">Trimestral</option><option value="puntual">Puntual</option>
             </select>
